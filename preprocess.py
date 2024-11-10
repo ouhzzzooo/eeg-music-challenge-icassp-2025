@@ -15,6 +15,7 @@ def parse():
     parser.add_argument('--split_dir', type=str, default=str("data/splits"))
     parser.add_argument('--input_dir', type=str, default=str("pruned"))
     parser.add_argument('--output_dir', type=str, default=str("preprocessed"))
+    parser.add_argument('--channels', type=str, default=None, help='Comma-separated list of channels to select, e.g., AF3,F3,FC5,Oz,O2')
 
     args = parser.parse_args()
     
@@ -61,17 +62,32 @@ def open_and_interpolate(file):
         raw_data = interpolate(raw_data)
     except ResidualNan as e:
         print(f"Residual NaNs in {file}")
-        return None
-    return raw_data
+        return None, None
+    # Set the interpolated data back into raw_file
+    raw_file._data = raw_data
+    return raw_file, raw_data
 
-def get_stats(file_list):
+def get_stats(file_list, args, band_name):
+    l_freq, h_freq = bands[band_name]
     tmp = []
     for file in tqdm(file_list):
-        raw_data = open_and_interpolate(file)
-        tmp.append(raw_data)
+        raw_file, raw_data = open_and_interpolate(file)
+        if raw_file is None:
+            continue
+        # Process raw_file
+        if args.channels is not None:
+            channels = args.channels.split(',')
+            raw_file.pick_channels(channels)
+        raw_file.set_eeg_reference('average', projection=False)
+        raw_file.filter(4.0, 45.0, fir_design='firwin')
+        raw_file.filter(l_freq, h_freq, fir_design='firwin')
+        raw_data_band = raw_file.get_data()
+        tmp.append(raw_data_band)
+    if len(tmp) == 0:
+        print(f"No data found for band {band_name}")
+        return None, None
     # concatenate all the data
     data = np.concatenate(tmp, axis=1)
-    #print(data.shape)
     # compute the mean and std
     mean = np.mean(data, axis=1)
     std = np.std(data, axis=1)
@@ -120,10 +136,25 @@ def main(args):
     train_files = [os.path.join(input_dir, "train", f"{s['id']}_eeg.fif") for s in splits["train"]]
     print(f"Found {len(train_files)} train files!")
     
-    # Get global train statistics (per channel)
-    print("Computing global statistics...")
-    mean, std = get_stats(train_files)
-    print("Global statistics computed!")
+    # Define frequency bands
+    global bands
+    bands = {
+        'theta': (4, 8),
+        'alpha': (8, 15),
+        'beta': (15, 32),
+        'gamma': (32, 40),
+        'all': (4, 40)
+    }
+    
+    # Get global train statistics (per channel) for each band
+    mean_per_band = {}
+    std_per_band = {}
+    for band_name in bands.keys():
+        print(f"Computing global statistics for band {band_name}...")
+        mean, std = get_stats(train_files, args, band_name)
+        mean_per_band[band_name] = mean
+        std_per_band[band_name] = std
+        print(f"Global statistics for band {band_name} computed!")
     
     print("Computing subject-wise statistics...")
     # Create a list with only train files for each subject for statistics
@@ -135,9 +166,17 @@ def main(args):
         train_files_per_subject[subject].append(os.path.join(input_dir, "train", f"{file['id']}_eeg.fif"))
     
     # Get train statistics per subject
-    stats_per_subject = {
-        subject_id : get_stats(files) for subject_id, files in train_files_per_subject.items()
-    }
+    stats_per_subject = {}
+    for subject_id, files in train_files_per_subject.items():
+        mean_subj = {}
+        std_subj = {}
+        for band_name in bands.keys():
+            print(f"Computing statistics for subject {subject_id}, band {band_name}...")
+            mean, std = get_stats(files, args, band_name)
+            mean_subj[band_name] = mean
+            std_subj[band_name] = std
+            print(f"Statistics for subject {subject_id}, band {band_name} computed!")
+        stats_per_subject[subject_id] = {'mean': mean_subj, 'std': std_subj}
     print("Subject-wise statistics computed!")
     
     print("Preprocessing data...")
@@ -146,16 +185,29 @@ def main(args):
         input_file = file
         output_file = file.replace(".fif", ".npy").replace(input_dir, output_dir)
         
-        raw_data = open_and_interpolate(input_file)
-        if raw_data is None:
+        raw_file, raw_data = open_and_interpolate(input_file)
+        if raw_file is None:
             continue
-        z_data = z_score(raw_data, mean, std)
-
-        np.save(output_file, z_data)
+        # Process raw_file
+        if args.channels is not None:
+            channels = args.channels.split(',')
+            raw_file.pick_channels(channels)
+        raw_file.set_eeg_reference('average', projection=False)
+        raw_file.filter(4.0, 45.0, fir_design='firwin')
+        
+        for band_name in bands.keys():
+            raw_band = raw_file.copy()
+            l_freq, h_freq = bands[band_name]
+            raw_band.filter(l_freq, h_freq, fir_design='firwin')
+            raw_data_band = raw_band.get_data()
+            mean = mean_per_band[band_name]
+            std = std_per_band[band_name]
+            z_data = z_score(raw_data_band, mean, std)
+            output_file_band = output_file.replace('.npy', f'_{band_name}.npy')
+            np.save(output_file_band, z_data)
     
     print("Preprocessing done!")
         
 if __name__ == "__main__":
     args = parse()
     main(args)
-    
