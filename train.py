@@ -76,6 +76,9 @@ def parse():
     parser.add_argument('--device', type=str, choices=['cuda:0', 'cuda:1', 'cpu'], default='cuda:0')
     parser.add_argument('--multi-gpu', action='store_true')
     parser.add_argument('--overfit-batch', action='store_true')
+    parser.add_argument('--l_freq', type=float, default=8.0, help='Low cutoff frequency for bandpass filter')
+    parser.add_argument('--h_freq', type=float, default=15.0, help='High cutoff frequency for bandpass filter')
+    parser.add_argument('--sfreq', type=float, default=128.0, help='Sampling frequency of the EEG data')
     
     args = parser.parse_args()
     

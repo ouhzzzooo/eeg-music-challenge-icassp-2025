@@ -6,7 +6,7 @@ from tqdm import tqdm
 import src.config as config
 from torchvision import transforms as T
 from torch.utils.data import Dataset, DataLoader
-from src.eeg_transforms import RandomCrop, ToTensor, Standardize
+from src.eeg_transforms import RandomCrop, ToTensor, Standardize, BandpassFilter
 
 mne.set_log_level("ERROR")
 
@@ -65,11 +65,13 @@ def get_loaders(args):
     # Define transforms
     train_transforms = T.Compose([
         RandomCrop(args.crop_size),
+        BandpassFilter(l_freq=args.l_freq, h_freq=args.h_freq, sfreq=args.sfreq),
         ToTensor(label_interface="long"),
         Standardize()
     ])
     
     test_transforms = T.Compose([
+        BandpassFilter(l_freq=args.l_freq, h_freq=args.h_freq, sfreq=args.sfreq),
         ToTensor(label_interface="long"),
         Standardize()
     ])

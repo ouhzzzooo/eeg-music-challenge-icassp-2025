@@ -173,3 +173,42 @@ class Standardize(object):
         eeg = (eeg - mean) / std
         
         return {'eeg': eeg, 'label': label}
+
+class BandpassFilter(object):
+    """
+    Apply a bandpass filter to the EEG data in a sample.
+
+    Parameters
+    ----------
+    l_freq : float
+        The low cutoff frequency in Hz.
+    h_freq : float
+        The high cutoff frequency in Hz.
+        If None, only low-pass filtering is applied.
+    sfreq : float
+        The sampling frequency of the EEG data.
+    """
+
+    def __init__(self, l_freq, h_freq, sfreq):
+        self.l_freq = l_freq
+        self.h_freq = h_freq
+        self.sfreq = sfreq
+
+    def __call__(self, sample):
+        eeg, label = sample['eeg'], sample['label']
+
+        # Check if eeg is a NumPy array
+        if isinstance(eeg, np.ndarray):
+            # Apply bandpass filter using scipy.signal
+            from scipy.signal import butter, filtfilt
+
+            nyquist = 0.5 * self.sfreq
+            low = self.l_freq / nyquist
+            high = self.h_freq / nyquist
+            b, a = butter(N=4, Wn=[low, high], btype='band')
+            eeg_filtered = filtfilt(b, a, eeg, axis=1)
+        else:
+            # If eeg is an MNE object
+            eeg_filtered = eeg.copy().filter(l_freq=self.l_freq, h_freq=self.h_freq, verbose=False).get_data()
+
+        return {'eeg': eeg_filtered, 'label': label}
