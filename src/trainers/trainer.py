@@ -6,6 +6,7 @@ import torch.nn as nn
 from tqdm.auto import tqdm
 from src.saver import Saver
 from sklearn import metrics
+from torch.optim import lr_scheduler  # Added import for learning rate scheduler
 
 class Trainer:
 
@@ -22,7 +23,7 @@ class Trainer:
         "Use for validation and test"
         data = batch['eeg']
         
-        # divide in chunks according to the model (crop size 1000)
+        # divide in chunks according to the model (crop size)
         n_chunks = data.shape[2] // self.args.crop_size
         chunks = torch.split(data, self.args.crop_size, dim=2)
         include_last = (data.shape[2] % self.args.crop_size) == 0
@@ -67,10 +68,10 @@ class Trainer:
 
         # Configure scheduler
         if self.args.use_scheduler:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            scheduler = lr_scheduler.ReduceLROnPlateau(
                 optim, 
-                mode = 'min', 
-                patience=self.args.patience, 
+                mode=self.args.scheduler_mode, 
+                patience=self.args.lr_patience, 
                 factor=self.args.reduce_lr_factor
             )
         else:
@@ -79,13 +80,19 @@ class Trainer:
         # Initialize the final result metrics
         result_metrics = { split: {} for split in splits }
 
-        # Train metrics
+        # Early stopping parameters
+        if self.args.early_stopping_mode == 'min':
+            best_metric = float('inf')
+        else:
+            best_metric = -float('inf')
+        num_epochs_no_improve = 0
+        early_stop = False
+
+        # Initialize variables for tracking max metrics
         lowest_train_loss = float('inf')
-        
-        # Validation metrics
         max_val_accuracy = -1
         max_val_accuracy_balanced = -1
-        
+
         # Watch model if enabled
         if self.args.watch_model == True:
             self.saver.watch_model(net)
@@ -111,10 +118,10 @@ class Trainer:
                         net.eval()
                         torch.set_grad_enabled(False)
                     else:
-                        break
+                        continue  # Skip validation before eval_after epochs
                     
                     # Process each batch
-                    for batch in tqdm(loaders[split]):
+                    for batch in tqdm(loaders[split], desc=f"Epoch {epoch+1}/{self.args.epochs} [{split}]"):
                         
                         # Use windowing for validation
                         if split != 'train':
@@ -128,8 +135,6 @@ class Trainer:
                         inputs = inputs.to(self.args.device)
                         labels = labels.to(self.args.device)
                         
-                        #labels = labels.squeeze()
-
                         # Forward
                         outputs = net(inputs)
                         
@@ -209,14 +214,6 @@ class Trainer:
                         else:
                             result_metrics[split][metric].append(epoch_metrics[metric])
 
-                    # Plot confusion matrix
-                    #self.saver.add_confusion_matrix(
-                    #    f"{split}/confusion_matrix", 
-                    #    epoch_labels.cpu().tolist(), 
-                    #    epoch_outputs.cpu().tolist(), 
-                    #    epoch
-                    #)
-
                 # Add learning rate to saver
                 self.saver.add_scalar("lr", optim.param_groups[0]['lr'], epoch)
 
@@ -229,46 +226,73 @@ class Trainer:
                 
                 # Compute validation metrics (across all validation splits)
                 val_splits = [split for split in splits if 'val' in split]
-                if 'val' not in result_metrics:
-                    result_metrics['val'] = {
-                        k: [] for k in result_metrics[val_splits[0]]
-                    }
-                for k in result_metrics[val_splits[0]]:
-                    result_metrics['val'][k].append(sum(result_metrics[split][k][-1] for split in val_splits) / len(val_splits))
-                    self.saver.add_scalar(f"val/{k}", result_metrics['val'][k][-1], epoch)
+                if val_splits:
+                    if 'val' not in result_metrics:
+                        result_metrics['val'] = {
+                            k: [] for k in result_metrics[val_splits[0]]
+                        }
+                    for k in result_metrics[val_splits[0]]:
+                        result_metrics['val'][k].append(sum(result_metrics[split][k][-1] for split in val_splits) / len(val_splits))
+                        self.saver.add_scalar(f"val/{k}", result_metrics['val'][k][-1], epoch)
 
-                # Max Validation accuracy
-                if 'val' in result_metrics and result_metrics['val']['accuracy'][-1] > max_val_accuracy:
-                    max_val_accuracy = result_metrics['val']['accuracy'][-1]
-                self.saver.add_scalar(f"val/max_accuracy", max_val_accuracy, epoch)
+                    # Max Validation accuracy
+                    if result_metrics['val']['accuracy'][-1] > max_val_accuracy:
+                        max_val_accuracy = result_metrics['val']['accuracy'][-1]
+                    self.saver.add_scalar(f"val/max_accuracy", max_val_accuracy, epoch)
 
-                # Max Validation balanced accuracy
-                if 'val' in result_metrics and result_metrics['val']['balanced_accuracy'][-1] > max_val_accuracy_balanced:
-                    max_val_accuracy_balanced = result_metrics['val']['balanced_accuracy'][-1]
-                    #test_accuracy_balanced_at_max_val_accuracy_balanced = result_metrics['test']['balanced_accuracy'][-1]
-                    # Save model
-                    # save the best model
-                    self.saver.save_model(net, self.args.model, epoch, model_name=f"{self.args.model}")
-                #self.saver.add_scalar(f"test/acc_balanced_at_max_val_acc_balanced", test_accuracy_balanced_at_max_val_accuracy_balanced, epoch)
-                self.saver.add_scalar(f"val/max_balanced_accuracy", max_val_accuracy_balanced, epoch)
+                    # Max Validation balanced accuracy
+                    if result_metrics['val']['balanced_accuracy'][-1] > max_val_accuracy_balanced:
+                        max_val_accuracy_balanced = result_metrics['val']['balanced_accuracy'][-1]
+                        # Save the best model
+                        self.saver.save_model(net, self.args.model, epoch, model_name=f"{self.args.model}_best")
+                    self.saver.add_scalar(f"val/max_balanced_accuracy", max_val_accuracy_balanced, epoch)
+
+                    # Early stopping check
+                    current_metric = result_metrics['val'][self.args.early_stopping_metric][-1]
+
+                    if ((self.args.early_stopping_mode == 'min' and current_metric < best_metric) or
+                        (self.args.early_stopping_mode == 'max' and current_metric > best_metric)):
+                        best_metric = current_metric
+                        num_epochs_no_improve = 0
+                    else:
+                        num_epochs_no_improve += 1
+
+                    if num_epochs_no_improve >= self.args.es_patience:
+                        print(f'Early stopping at epoch {epoch+1}')
+                        early_stop = True
+
+                    # Check LR scheduler
+                    if scheduler is not None:
+                        scheduler_metric = result_metrics['val'][self.args.scheduler_metric][-1]
+                        scheduler.step(scheduler_metric)
+                else:
+                    # If no validation splits, skip early stopping and scheduler
+                    current_metric = None
 
                 # log all metrics
-                self.saver.log()            
+                self.saver.log()
 
-                # Check LR scheduler
-                if scheduler is not None:
-                    scheduler.step()
+                # Print metrics
+                print(f"Epoch {epoch+1}/{self.args.epochs}")
+                print(f"Train Loss: {result_metrics['train']['loss'][-1]:.4f}, Accuracy: {result_metrics['train']['accuracy'][-1]:.4f}")
+                if val_splits:
+                    print(f"Val Loss: {result_metrics['val']['loss'][-1]:.4f}, Accuracy: {result_metrics['val']['accuracy'][-1]:.4f}")
+                    print(f"Best Val {self.args.early_stopping_metric}: {best_metric:.4f}")
+
+                if early_stop:
+                    break  # Break the epoch loop
         
         except KeyboardInterrupt:
-            print('KeyboardInterrupt')
-            pass
-
+            print('Training interrupted by user.')
+        
         except FloatingPointError as err:
             print(f'Error: {err}')
         
         # Print main metrics
-        print(f'Max val. accuracy:      {max_val_accuracy:.4f}')
-        print(f'Max val. balanced acc.: {max_val_accuracy_balanced:.4f}')
+        print(f'Final Training Loss: {result_metrics["train"]["loss"][-1]:.4f}')
+        print(f'Max Validation Accuracy: {max_val_accuracy:.4f}')
+        print(f'Max Validation Balanced Accuracy: {max_val_accuracy_balanced:.4f}')
+        print(f'Best {self.args.early_stopping_metric}: {best_metric:.4f}')
         
         return net, result_metrics
     
@@ -300,7 +324,7 @@ class Trainer:
             split_predictions = []
             
             # Process each batch
-            for batch in tqdm(test_loader):
+            for batch in tqdm(test_loader, desc=f"Testing [{split}]"):
                 
                 batch = self.windowing(batch)
                 
