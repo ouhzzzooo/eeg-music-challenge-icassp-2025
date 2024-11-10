@@ -1,0 +1,31 @@
+'''
+This note is for command line to be use to run the code for this project
+TODO (For further implement)
+make bash script that can run more efficiently
+'''
+
+Run preprocess.py code
+
+python preprocess.py --split_dir data/splits --channels F3
+
+Run train.py code
+
+python train.py --task subject_identification --model eegnet --lr 0.001 --epochs 100 \
+                --use_scheduler --scheduler_metric 'loss' --scheduler_mode 'min' --lr_patience 5 \
+                --early_stopping_metric 'loss' --early_stopping_mode 'min' --es_patience 10 \
+                --l_freq 8.0 --hfreq 15.0 --sfreq 128.0
+
+python train.py --task emotion_recognition --model eegnet --voting_strategy majority --lr 0.001 --epochs 100 \
+                --use_scheduler --scheduler_metric 'loss' --scheduler_mode 'min' --lr_patience 5 \
+                --early_stopping_metric 'loss' --early_stopping_mode 'min' --es_patience 10 \
+                --l_freq 8.0 --hfreq 15.0 --sfreq 128.0
+
+
+Run inference.py code
+
+python inference.py --task subject_identification --model eegnet --voting_strategy mean \
+                    --resume exps/subject_identification/eegnet/baseline_YYYY-MM-DD_HH-MM-SS
+
+python inference.py --task emotion_recognition --model eegnet --voting_strategy majority \
+                    --resume exps/emotion_recognition/eegnet/baseline_YYYY-MM-DD_HH-MM-SS
+
