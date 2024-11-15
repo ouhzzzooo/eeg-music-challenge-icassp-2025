@@ -3,8 +3,10 @@ import torch.nn as nn
 import math
 
 class ConvLayer2D(nn.Sequential):
-    def __init__(self, in_channels, out_channels, kernel, stride, padding, dilation):
+    def __init__(self, in_channels, out_channels, kernel, stride, padding=None, dilation=1):
         super().__init__()
+        if padding is None:
+            padding = (kernel[0] // 2, kernel[1] // 2)
         self.add_module('norm', nn.BatchNorm2d(in_channels))
         self.add_module('relu', nn.ReLU(True))
         self.add_module('conv', nn.Conv2d(in_channels, out_channels, kernel_size=kernel,
@@ -20,26 +22,25 @@ class TemporalBlock(nn.Module):
         if len(dilation_list) < n_layers:
             dilation_list = dilation_list + [dilation_list[-1]] * (n_layers - len(dilation_list))
 
-        padding = []
-        # Compute padding for each temporal layer to have a fixed size output
-        # Output size is controlled by striding to be 1 / 'striding' of the original size
-        for dilation in dilation_list:
-            filter_size = kernel_size[1] * dilation[1] - 1
-            temp_pad = math.floor((filter_size - 1) / 2) - 1 * (dilation[1] // 2 - 1)
-            padding.append((0, temp_pad))
-
+        # Calculate padding for each temporal layer to keep consistent output sizes
         self.layers = nn.ModuleList([
             ConvLayer2D(
-                in_channels, out_channels, kernel_size, stride, padding[i], dilation_list[i]
-            ) for i in range(n_layers)
+                in_channels, out_channels, kernel_size, stride, 
+                padding=(0, (kernel_size[1] // 2) * dilation[1]),  # Adaptive padding to ensure even sizes
+                dilation=dilation
+            ) for dilation in dilation_list
         ])
 
     def forward(self, x):
         features = []
-
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             out = layer(x)
+            #print(f"[TemporalBlock] Layer {i} output shape: {out.shape}")
             features.append(out)
+
+        # Ensure consistent concatenation
+        min_width = min(feature.shape[3] for feature in features)
+        features = [feature[:, :, :, :min_width] for feature in features]  # Crop to minimum width if needed
 
         out = torch.cat(features, 1)
         return out
@@ -50,37 +51,34 @@ class SpatialBlock(nn.Module):
        
         kernel_list = []
         for i in range(num_spatial_layers):
-            kernel_list.append(((input_height // (i + 1)), 1))
+            kernel_height = min(input_height // (i + 1), 3)  # Ensure kernel height is at most 3
+            kernel_list.append((kernel_height, 1))
 
         padding = []
         for kernel in kernel_list:
-            temp_pad = math.floor((kernel[0] - 1) / 2)# - 1 * (kernel[1] // 2 - 1)
+            temp_pad = math.floor((kernel[0] - 1) / 2)
             padding.append((temp_pad, 0))
-
-        feature_height = input_height // stride[0]
 
         self.layers = nn.ModuleList([
             ConvLayer2D(
                 in_channels, out_channels, kernel_list[i], stride, padding[i], 1
             ) for i in range(num_spatial_layers)
         ])
-    
+
     def forward(self, x):
         features = []
-
         for layer in self.layers:
             out = layer(x)
             features.append(out)
-
         out = torch.cat(features, 1)
-
         return out
 
-def conv3x3(in_channels, out_channels, stride=1):
-    return nn.Conv2d(in_channels, out_channels, kernel_size=3, 
-                     stride=stride, padding=1, bias=False)
+def conv3x3(in_channels, out_channels, stride=1, input_size=(3, 3)):
+    kernel_size = (min(input_size[0], 3), min(input_size[1], 3))  # Cap kernel size at (3,3)
+    padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+    return nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, 
+                     stride=stride, padding=padding, bias=False)
 
-# Residual block
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, downsample=None):
         super(ResidualBlock, self).__init__()
@@ -90,16 +88,23 @@ class ResidualBlock(nn.Module):
         self.conv2 = conv3x3(out_channels, out_channels)
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.downsample = downsample
-        
+
     def forward(self, x):
+        #print(f"[ResidualBlock] Input shape: {x.shape}")
         residual = x
         out = self.conv1(x)
+        #print(f"[ResidualBlock] After conv1 shape: {out.shape}")
         out = self.bn1(out)
         out = self.relu(out)
         out = self.conv2(out)
+        #print(f"[ResidualBlock] After conv2 shape: {out.shape}")
         out = self.bn2(out)
+        
         if self.downsample:
             residual = self.downsample(x)
+            #print(f"[ResidualBlock] After downsample shape: {residual.shape}")
+            
         out += residual
         out = self.relu(out)
+        #print(f"[ResidualBlock] Output shape: {out.shape}")
         return out

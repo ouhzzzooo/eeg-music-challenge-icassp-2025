@@ -6,7 +6,7 @@ import torch.nn as nn
 from src.models.layers import * 
 
 class FeaturesExtractor(nn.Module):
-    def __init__(self, in_channels, temp_channels, out_channels, input_width, in_height,
+    def __init__(self, in_channels, temp_channels, out_channels, input_width, input_height,
                  temporal_kernel, temporal_stride, temporal_dilation_list, num_temporal_layers,
                  num_spatial_layers, spatial_stride, num_residual_blocks, down_kernel, down_stride):
         super().__init__()
@@ -16,22 +16,31 @@ class FeaturesExtractor(nn.Module):
         )
 
         self.spatial_block = SpatialBlock(
-            temp_channels * num_temporal_layers, out_channels, num_spatial_layers, spatial_stride, in_height
+            in_channels=50,  # Match the output of TemporalBlock
+            out_channels=200,  # Desired output channels
+            num_spatial_layers=num_spatial_layers,
+            stride=spatial_stride,
+            input_height=input_height
         )
 
+        # First residual block with downsample to match channels
         self.res_blocks = nn.ModuleList([
             nn.Sequential(
                 ResidualBlock(
-                    out_channels * num_spatial_layers, out_channels * num_spatial_layers
-                ),
-                ConvLayer2D(
-                    out_channels * num_spatial_layers, out_channels * num_spatial_layers, down_kernel, down_stride, 0, 1
+                    in_channels=800,  # Match spatial block output channels
+                    out_channels=200,  # Desired output channels
+                    downsample=nn.Conv2d(800, 200, kernel_size=1)  # Downsample only once
                 )
-            ) for i in range(num_residual_blocks)
+            )] + [
+            # Subsequent blocks without downsampling
+            ResidualBlock(
+                in_channels=200,  # Consistent channels for subsequent blocks
+                out_channels=200
+            ) for _ in range(num_residual_blocks - 1)
         ])
 
         self.final_conv = ConvLayer2D(
-            out_channels * num_spatial_layers, out_channels, down_kernel, 1, 0, 1
+            200, out_channels, kernel=(1, 1), stride=1, padding=0, dilation=1
         )
 
     def forward(self, x):
@@ -40,16 +49,14 @@ class FeaturesExtractor(nn.Module):
         #print(f"[TEMPORAL] {out.shape}")
         out = self.spatial_block(out)
         #print(f"[SPATIAL] {out.shape}")
-        if len(self.res_blocks) > 0:
-            for res_block in self.res_blocks:
-                out = res_block(out)
-                #print(f"[RESIDUAL] {out.shape}")
+        for i, res_block in enumerate(self.res_blocks):
+            out = res_block(out)
+            #print(f"[RESIDUAL {i+1}] {out.shape}")
         out = self.final_conv(out)
         #print(f"[FINAL] {out.shape}")
-
         return out
 
-class Model(nn.Module):
+# class Model(nn.Module):
     '''The model for EEG classification.
     The imput is a tensor where each row is a channel the recorded signal and each colums is a time sample.
     The model performs different 2D to extract temporal e spatial information.
@@ -72,53 +79,71 @@ class Model(nn.Module):
         down_kernel: size of the bottleneck kernel
         down_stride: size of the bottleneck stride
         '''
+
+class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
-        args_defaults=dict(
-            in_channels=1, 
-            temp_channels=10, 
-            out_channels=50, 
-            num_classes=40, 
+        args_defaults = dict(
+            in_channels=1,
+            temp_channels=10,
+            out_channels=50,
+            num_classes=40,
             embedding_size=1000,
-            input_width=440, 
-            input_height=128, 
-            temporal_dilation_list=[(1,1),(1,2),(1,4),(1,8),(1,16)],
-            temporal_kernel=(1,33), 
-            temporal_stride=(1,2),
+            input_width=440,
+            input_height=128,
+            temporal_dilation_list=[(1, 1), (1, 2), (1, 4), (1, 8), (1, 16)],
+            temporal_kernel=(1, 33),
+            temporal_stride=(1, 2),
             num_temp_layers=4,
-            num_spatial_layers=4, 
-            spatial_stride=(2,1), 
-            num_residual_blocks=4, 
-            down_kernel=3, 
+            num_spatial_layers=4,
+            spatial_stride=(2, 1),
+            num_residual_blocks=4,
+            down_kernel=3,
             down_stride=2
         )
-        for arg,default in args_defaults.items():
-            setattr(self, arg, args[arg] if arg in args and args[arg] is not None else default)
+        for arg, default in args_defaults.items():
+            setattr(self, arg, getattr(args, arg, default))
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Ensure encoder is on the correct device
         self.encoder = FeaturesExtractor(
-            self.in_channels, self.temp_channels, self.out_channels, 
-            self.input_width, self.input_height, self.temporal_kernel, 
-            self.temporal_stride, self.temporal_dilation_list, 
-            self.num_temp_layers, self.num_spatial_layers, 
-            self.spatial_stride, self.num_residual_blocks, 
-            self.down_kernel, self.down_stride)
+            self.in_channels, self.temp_channels, self.out_channels,
+            self.input_width, self.input_height, self.temporal_kernel,
+            self.temporal_stride, self.temporal_dilation_list,
+            self.num_temp_layers, self.num_spatial_layers,
+            self.spatial_stride, self.num_residual_blocks,
+            self.down_kernel, self.down_stride
+        ).to(self.device)
 
-        encoding_size = self.encoder(torch.zeros(1, self.in_channels, self.input_height, self.input_width)).contiguous().view(-1).size()[0]
-
-        self.classifier = nn.Sequential(
-            nn.Linear(encoding_size, self.embedding_size),
-            nn.ReLU(True),
-            nn.Linear(self.embedding_size, self.num_classes), 
-        )
+        # Initially set classifier to None, it will be initialized later based on encoding size
+        self.classifier = None
 
     def forward(self, x):
         if len(x.shape) == 3:
             x = x.unsqueeze(1)
+        
+        # Move input to the device
+        x = x.to(self.device)
         #print(f"[INPUT] {x.shape}")
+
         out = self.encoder(x)
         #print(f"[ENCODER] {out.shape}")
-        out = out.view(x.size(0), -1)
-        #print(f"[FLATTEN] {out.shape}")
+
+        # Flatten and calculate encoding_size based on the actual batch size and shape
+        out = out.view(out.size(0), -1)
+        encoding_size = out.size(1)
+        #print(f"[FLATTEN] {out.shape} (encoding_size: {encoding_size})")
+
+        # Initialize classifier if it hasn't been initialized or if encoding_size has changed
+        if self.classifier is None or self.classifier[0].in_features != encoding_size:
+            self.classifier = nn.Sequential(
+                nn.Linear(encoding_size, self.embedding_size),
+                nn.ReLU(True),
+                nn.Linear(self.embedding_size, self.num_classes)
+            ).to(self.device)  # Move classifier to the same device
+            #print(f"[CLASSIFIER Initialized with encoding_size {encoding_size}]")
+
         out = self.classifier(out)
         #print(f"[CLASSIFIER] {out.shape}")
         return out
