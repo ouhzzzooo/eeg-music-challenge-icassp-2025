@@ -16,6 +16,7 @@ def parse():
     parser.add_argument('--input_dir', type=str, default=str("pruned"))
     parser.add_argument('--output_dir', type=str, default=str("preprocessed"))
     parser.add_argument('--channels', type=str, default=None, help='Comma-separated list of channels to select, e.g., AF3,F3,FC5,Oz,O2')
+    parser.add_argument('--bands', type=str, default='theta,alpha,beta,gamma,all', help='Comma-separated list of frequency bands to process, e.g., alpha,beta')
 
     args = parser.parse_args()
     
@@ -137,14 +138,20 @@ def main(args):
     print(f"Found {len(train_files)} train files!")
     
     # Define frequency bands
-    global bands
-    bands = {
+    all_bands = {
         'theta': (4, 8),
         'alpha': (8, 15),
         'beta': (15, 32),
         'gamma': (32, 40),
         'all': (4, 40)
     }
+
+    # Get bands to process from args
+    bands_to_process = args.bands.split(',')
+
+    # Filter the bands dictionary
+    global bands
+    bands = {band_name: all_bands[band_name] for band_name in bands_to_process if band_name in all_bands}
     
     # Get global train statistics (per channel) for each band
     mean_per_band = {}
@@ -156,6 +163,8 @@ def main(args):
         std_per_band[band_name] = std
         print(f"Global statistics for band {band_name} computed!")
     
+    # Uncomment the following lines if you want to compute subject-wise statistics
+    '''
     print("Computing subject-wise statistics...")
     # Create a list with only train files for each subject for statistics
     train_files_per_subject = {}
@@ -178,6 +187,7 @@ def main(args):
             print(f"Statistics for subject {subject_id}, band {band_name} computed!")
         stats_per_subject[subject_id] = {'mean': mean_subj, 'std': std_subj}
     print("Subject-wise statistics computed!")
+    '''
     
     print("Preprocessing data...")
     # Process each file
@@ -203,8 +213,8 @@ def main(args):
             mean = mean_per_band[band_name]
             std = std_per_band[band_name]
             z_data = z_score(raw_data_band, mean, std)
-            output_file_band = output_file.replace('.npy', f'_{band_name}.npy')
-            np.save(output_file_band, z_data)
+            #output_file_band = output_file.replace('.npy', f'_{band_name}.npy')
+            np.save(output_file, z_data)
     
     print("Preprocessing done!")
         
