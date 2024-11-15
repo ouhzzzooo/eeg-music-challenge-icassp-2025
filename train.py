@@ -5,6 +5,8 @@ from pathlib import Path
 import src.config as config
 import src.trainers as trainers
 from src.dataset import get_loaders
+import torch as torch
+from src.models.eegchannelnet import Model  # Add this line to import the Model class
 
 def parse():
     # Init parser
@@ -21,9 +23,10 @@ def parse():
     
     # Dataset options
     parser.add_argument('--split_dir', type=str, default=str("data/splits"))
-    parser.add_argument('--data_type', type=str, default="preprocessed", choices=["raw", "pruned", "preprocessed"])
+    parser.add_argument('--data_type', type=str, default="preprocessed")
+                        #, choices=["raw", "pruned", "preprocessed"])
     parser.add_argument('--preprocessing_pipe', type=str, default="z_score_data/")
-    parser.add_argument('--crop_size', type=int, default="1280")
+    parser.add_argument('--crop_size', type=int, default="2560")
     parser.add_argument('--num_workers', type=int, default=0) 
     
     # Experiment options
@@ -81,6 +84,7 @@ def parse():
     parser.add_argument('--sfreq', type=float, default=128.0, help='Sampling frequency of the EEG data')
     
     args = parser.parse_args()
+    #args.device = torch.device("cuda" if torch.cuda.is_available() and args.device != "cpu" else "cpu")
     
     # Set number of classes
     if args.task == "emotion_recognition":
@@ -95,6 +99,8 @@ def parse():
     return args
 
 def main(args):
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.sweep:
         # Load sweep config
@@ -135,6 +141,8 @@ def main(args):
         trainer_module = getattr(trainers, updated_args.trainer)
         trainer_class = getattr(trainer_module, 'Trainer')
         trainer = trainer_class(updated_args)
+
+        model = Model(updated_args).to(updated_args.device)
 
         # Run training
         if updated_args.debug:
